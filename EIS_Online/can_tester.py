@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from enum import Enum
 import queue
 
-# 导入你的CANReader类
-from tools.CAN_Tool import CANReader
+from acquisition.can_reader import CANReader
+from transport.data_transmitter import DataTransmitter
 
 class TestResult(Enum):
     SUCCESS = "SUCCESS"
@@ -55,6 +55,11 @@ class CAN_Tester:
         self.response_queue = queue.Queue()
         self.command_history = []
         self.response_history = []
+
+        # HTTP 上传在独立线程执行，避免阻塞 CAN 接收。
+        self.upload_queue = queue.Queue(maxsize=1)
+        self.upload_thread = None
+        self.data_transmitter = self.setup_data_transmitter()
         
         # EIS状态扫频状态
         self.eis_sweep_in_progress = False
@@ -150,6 +155,57 @@ class CAN_Tester:
         """记录错误日志"""
         self.logger.error(message)
         print(f"[ERROR] {message}")
+
+    def log_warning(self, message: str):
+        """记录警告日志"""
+        self.logger.warning(message)
+        print(f"[WARNING] {message}")
+
+    def setup_data_transmitter(self):
+        """根据配置初始化 SQLite -> Web API 上传器。"""
+        upload_config = self.config.get("upload_config", {})
+        if not upload_config.get("enabled", True):
+            self.log_info("自动上传已禁用")
+            return None
+
+        transmitter = DataTransmitter(
+            server_url=upload_config.get(
+                "server_url",
+                "http://192.168.98.2:8080/api/v1/transmit-data",
+            ),
+            max_retries=int(upload_config.get("max_retries", 3)),
+            request_timeout_seconds=int(upload_config.get("timeout_seconds", 30)),
+        )
+        self.log_info(f"自动上传已启用: {transmitter.server_url}")
+        return transmitter
+
+    def request_upload(self):
+        """合并重复通知，交给单一工作线程串行上传。"""
+        if not self.data_transmitter:
+            return
+        try:
+            self.upload_queue.put_nowait(object())
+        except queue.Full:
+            pass
+
+    def upload_worker_loop(self):
+        """上传待发送扫频，直到无数据或本轮上传失败。"""
+        self.log_info("自动上传线程已启动")
+        while self.running:
+            try:
+                self.upload_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            try:
+                while self.running and self.data_transmitter.upload_once():
+                    pass
+            except Exception as error:
+                self.log_error(f"自动上传异常: {error}")
+            finally:
+                self.upload_queue.task_done()
+
+        self.log_info("自动上传线程已停止")
     
     def log_data(self, command: str, param1: float, param2: float, 
                 response: str, result: TestResult, error_msg: str = ""):
@@ -175,6 +231,8 @@ class CAN_Tester:
         channel = can_config.get("channel", "can1")
         bitrate = can_config.get("bitrate", 500000)
         timeout = can_config.get("timeout", 0.1)
+        reassembly_timeout = can_config.get("reassembly_timeout_seconds", 2.0)
+        max_response_bytes = can_config.get("max_response_bytes", 65536)
         
         # 解析十六进制的message_id
         message_id_str = can_config.get("message_id", "0x10")
@@ -190,7 +248,9 @@ class CAN_Tester:
                 bitrate=str(bitrate),
                 timeout_duration=timeout,
                 message_id=message_id,  # 传入整数类型
-                on_eis_complete=self._on_eis_sweep_complete  # 设置回调
+                on_eis_complete=self._on_eis_sweep_complete,  # 设置回调
+                reassembly_timeout_seconds=float(reassembly_timeout),
+                max_response_bytes=int(max_response_bytes),
             )
             
             self.can_reader.start_reading()
@@ -347,6 +407,7 @@ class CAN_Tester:
         """EIS扫频完成回调"""
         self.eis_sweep_in_progress = False
         self.log_info("EIS扫频完成（数据已存入数据库）")
+        self.request_upload()
 
     def run_eis_sweep_test(self):
         """执行EIS扫频测试"""
@@ -460,6 +521,12 @@ class CAN_Tester:
             return False
         
         self.running = True
+
+        if self.data_transmitter:
+            self.upload_thread = threading.Thread(target=self.upload_worker_loop, daemon=True)
+            self.upload_thread.start()
+            # 启动时一并重试上次断网遗留的未发送数据。
+            self.request_upload()
         
         # 启动周期性测试线程
         self.test_thread = threading.Thread(target=self.periodic_test_loop, daemon=True)
@@ -476,6 +543,9 @@ class CAN_Tester:
         
         if self.test_thread:
             self.test_thread.join(timeout=5)
+
+        if self.upload_thread:
+            self.upload_thread.join(timeout=5)
         
         if self.can_reader:
             try:

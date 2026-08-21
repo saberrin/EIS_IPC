@@ -1,23 +1,116 @@
 from database.config import DB_PATH
 import sqlite3
 from datetime import datetime
-import fcntl
 import time
 import threading
 import re
+from pathlib import Path
 
-from typing import List, Dict
+from typing import List
+from database.db_init import init_database
 from database.repository import Repository
 from database.entity import EisMeasurement
 
-from collections import Counter
 import json
 import can
 import os
+from collections import deque
 
-class CANReader():
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+
+
+class CANStreamReassembler:
+    """按 CAN 仲裁 ID 重组以 ``>`` 开始、以 ``<`` 结束的响应。"""
+
+    def __init__(self, timeout_seconds=2.0, max_message_bytes=65536):
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if max_message_bytes <= 0:
+            raise ValueError("max_message_bytes must be positive")
+
+        self.timeout_seconds = float(timeout_seconds)
+        self.max_message_bytes = int(max_message_bytes)
+        self._buffers = {}
+        self._updated_at = {}
+        self.dropped_timeouts = 0
+        self.dropped_oversize = 0
+        self.dropped_resync = 0
+
+    def expire(self, now=None):
+        """丢弃长时间没有后续帧的半包，并返回对应的仲裁 ID。"""
+        now = time.monotonic() if now is None else float(now)
+        expired = [
+            source_id
+            for source_id, updated_at in self._updated_at.items()
+            if now - updated_at >= self.timeout_seconds
+        ]
+        for source_id in expired:
+            self._buffers.pop(source_id, None)
+            self._updated_at.pop(source_id, None)
+        self.dropped_timeouts += len(expired)
+        return expired
+
+    def feed(self, source_id, payload, now=None):
+        """加入一个 CAN 数据帧，返回本帧完成的零条或多条协议消息。"""
+        now = time.monotonic() if now is None else float(now)
+        self.expire(now)
+        payload = bytes(payload)
+        if not payload:
+            return []
+
+        source_id = int(source_id)
+        buffer = self._buffers.setdefault(source_id, bytearray())
+        buffer.extend(payload)
+        completed = []
+
+        while buffer:
+            start_index = buffer.find(b">")
+            if start_index < 0:
+                # 起始符之前的数据不属于应用层响应。
+                buffer.clear()
+                break
+            if start_index:
+                del buffer[:start_index]
+
+            end_index = buffer.find(b"<", 1)
+            next_start_index = buffer.find(b">", 1)
+            if next_start_index >= 0 and (end_index < 0 or next_start_index < end_index):
+                # 上一条消息没有结束，新响应已经开始；从新响应重新同步。
+                del buffer[:next_start_index]
+                self.dropped_resync += 1
+                continue
+
+            if end_index >= 0:
+                completed.append(bytes(buffer[: end_index + 1]))
+                del buffer[: end_index + 1]
+                continue
+
+            if len(buffer) > self.max_message_bytes:
+                buffer.clear()
+                self.dropped_oversize += 1
+            break
+
+        if buffer:
+            self._updated_at[source_id] = now
+        else:
+            self._buffers.pop(source_id, None)
+            self._updated_at.pop(source_id, None)
+        return completed
+
+class CANReader:
     
-    def __init__(self, channel="can1", bitrate="500000", timeout_duration=1, message_id=0x10, on_eis_complete = None):
+    def __init__(
+        self,
+        channel="can1",
+        bitrate="500000",
+        timeout_duration=1,
+        message_id=0x10,
+        on_eis_complete=None,
+        address_mapping_path=None,
+        reassembly_timeout_seconds=2.0,
+        max_response_bytes=65536,
+    ):
         super().__init__()
         # os.system(f'sudo ip link set {channel} type can bitrate {bitrate}')
         # os.system(f'sudo ifconfig {channel} up')
@@ -55,7 +148,14 @@ class CANReader():
         self.real_time_id = None
         
         # 从配置文件加载地址映射
+        self.address_mapping_path = Path(address_mapping_path) if address_mapping_path else PROJECT_DIR / "address_mapping.json"
         self.address_mapping = self.load_address_mapping()
+        self.reassembler = CANStreamReassembler(
+            timeout_seconds=reassembly_timeout_seconds,
+            max_message_bytes=max_response_bytes,
+        )
+        self._completed_messages = deque()
+        self._configure_receive_filters()
         
         # 不再需要用户输入，从配置文件中获取
         self.container_number = None
@@ -64,8 +164,6 @@ class CANReader():
 
         self.database_init()
         # self.setup_can_interface(channel,bitrate)
-        with open("config.json", "r") as config_file:
-            self.config = json.load(config_file)
 
     def setup_can_interface(self, channel, bitrate):
         """设置CAN接口"""
@@ -102,9 +200,9 @@ class CANReader():
         
 
     def database_init(self):
-        """Sets the container, cluster, and pack based on user input."""
-        # Initialize SQLite database connection using the updated database
+        """初始化 SQLite 结构并建立连接。"""
         try:
+            init_database()
             self.connection = sqlite3.connect(self.db_path)
             self.cursor = self.connection.cursor()
             print("SQLite database connection successful")
@@ -113,9 +211,9 @@ class CANReader():
             self.connection = None
 
     def load_address_mapping(self):
-        """从配置文件加载地址映射，支持16进制格式"""
+        """加载板卡级映射：板卡地址只决定 Container/Cluster/Pack。"""
         try:
-            with open("address_mapping.json", "r") as f:
+            with open(self.address_mapping_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
                 mapping = {}
                 for item in config.get("address_mapping", []):
@@ -126,17 +224,36 @@ class CANReader():
                     else:
                         addr_id = int(addr_str)
 
-                    mapping[addr_id] = {
-                        "container_number": item["container_number"],
-                        "cluster_number": item["cluster_number"], 
-                        "pack_number": item["pack_number"],
-                        "cell_id": item["cell_id"]
+                    if addr_id in mapping:
+                        raise ValueError(f"Duplicate board address: 0x{addr_id:02X}")
+
+                    board_mapping = {
+                        "container_number": int(item["container_number"]),
+                        "cluster_number": int(item["cluster_number"]),
+                        "pack_number": int(item["pack_number"]),
                     }
+                    if any(value <= 0 for value in board_mapping.values()):
+                        raise ValueError(f"Invalid topology for board 0x{addr_id:02X}: {board_mapping}")
+                    mapping[addr_id] = board_mapping
                 print(f"Address mapping loaded successfully: {mapping}")
                 return mapping
         except Exception as e:
             print(f"Error loading address mapping: {e}")
             return {}
+
+    def _configure_receive_filters(self):
+        """尽量在 SocketCAN 层只接收已配置板卡的标准数据帧。"""
+        if not self.bus or not self.address_mapping:
+            return
+        filters = [
+            {"can_id": addr_id, "can_mask": 0x7FF, "extended": False}
+            for addr_id in sorted(self.address_mapping)
+        ]
+        try:
+            self.bus.set_filters(filters)
+        except Exception as error:
+            # 部分虚拟 CAN 后端不支持过滤，仍由下面的软件过滤兜底。
+            print(f"Warning: failed to configure CAN receive filters: {error}")
 
 
     def start_reading(self):
@@ -161,36 +278,58 @@ class CANReader():
                 self.parse_and_insert_data(line_decoded)
 
     def read_until_end(self):
-        bus = self.bus
-        try:
-            
-            while self.running:
-                bus.set_filters([])  
-                received_data = b""
-                # print("Start receiving...")
-                while True:
-                    msg = bus.recv(timeout=self.timeout_duration) 
-                    if msg is None:
-                        # print("Timeout waiting for CAN message")
-                        break
+        if self._completed_messages:
+            return self._completed_messages.popleft()
 
-                    # if msg.arbitration_id == 0x88:
-                    #     # 可选：记录过滤的帧用于调试
-                    #     # print(f"过滤系统帧: ID=0x{msg.arbitration_id:X}, Data={msg.data.hex()}")
-                    #     continue
-                    # print(f"Raw frame: ID=0x{msg.arbitration_id:X}, Data={msg.data}")
-                    segment = bytes(msg.data)
-                    # print(f"Received: {segment}")
-                    received_data += segment
-                    if self.line_ending in received_data:
-                        line_end_index = received_data.index(self.line_ending) + len(self.line_ending)
-                        received_data = received_data[:line_end_index]
-                        # print(f"Received: {received_data}")
-                        return received_data
-        except IOError as e:
+        bus = self.bus
+        if bus is None:
+            time.sleep(self.timeout_duration)
+            return None
+
+        try:
+            while self.running:
+                msg = bus.recv(timeout=self.timeout_duration)
+                if msg is None:
+                    expired = self.reassembler.expire()
+                    for source_id in expired:
+                        print(f"Warning: discarded stale CAN partial response from 0x{source_id:X}")
+                    continue
+
+                if (
+                    getattr(msg, "is_error_frame", False)
+                    or getattr(msg, "is_remote_frame", False)
+                    or getattr(msg, "is_extended_id", False)
+                ):
+                    continue
+
+                source_id = int(msg.arbitration_id)
+                if self.address_mapping and source_id not in self.address_mapping:
+                    continue
+
+                for response in self.reassembler.feed(source_id, msg.data):
+                    if self._response_matches_source(response, source_id):
+                        self._completed_messages.append(response)
+                    else:
+                        print(
+                            "Warning: discarded CAN response whose header address "
+                            f"does not match arbitration ID 0x{source_id:X}"
+                        )
+
+                if self._completed_messages:
+                    return self._completed_messages.popleft()
+        except (IOError, OSError) as e:
             print(f"Error in read_until_end: {e}")
             time.sleep(0.01)
-  
+        except Exception as e:
+            print(f"Unexpected CAN receive error: {e}")
+            time.sleep(0.05)
+        return None
+
+    @staticmethod
+    def _response_matches_source(response, source_id):
+        """响应头中的板卡地址必须与 CAN 仲裁 ID 一致。"""
+        match = re.match(rb"^>0x([0-9A-Fa-f]+)\s*,", response)
+        return bool(match and int(match.group(1), 16) == int(source_id))
 
     def write_data(self, data_to_send):
         if isinstance(data_to_send, str):
@@ -218,65 +357,83 @@ class CANReader():
             # 1. 扫频数据 (GETE命令) - 完整的一条命令
             if ">0x" in line and "GETE" in line and "CMD_OK" in line and ';' in line:
                 try:
-                    # 格式: >0x28,GETE,0.000000,0.000000,CMD_OK,R1,value,I1,value,F1,value;R2,value,I2,value,F2,value;...
-                    
-                    # 解析地址
-                    header_part = line.split(',')[0]  # >0x28
-                    if header_part.startswith('>0x'):
-                        addr_id = int(header_part[3:], 16)
+                    # 固件响应头: >0x11, GETE, <Cell_ID>, <Param2>,CMD_OK,
+                    # 板卡地址决定 Container/Cluster/Pack，Cell_ID 决定 Pack 内 Cell。
+                    header_match = re.match(
+                        r"^\s*>0x([0-9A-Fa-f]+)\s*,\s*GETE\s*,\s*(\d+)\s*,",
+                        line,
+                    )
+                    if not header_match:
+                        print(f"Error: invalid GETE response header: {line}")
+                        return False
+
+                    addr_id = int(header_match.group(1), 16)
+                    cell_id = int(header_match.group(2))
+                    if cell_id <= 0:
+                        print(f"Error: invalid Cell_ID {cell_id} from board 0x{addr_id:02X}")
+                        return False
                         
-                        if addr_id not in self.address_mapping:
-                            print(f"Warning: No mapping found for address {addr_id}")
-                            return
+                    if addr_id not in self.address_mapping:
+                        print(f"Warning: No mapping found for board address 0x{addr_id:02X}")
+                        return False
                         
-                        mapping = self.address_mapping[addr_id]
-                        container_number = mapping["container_number"]
-                        cluster_number = mapping["cluster_number"]
-                        pack_number = mapping["pack_number"]
-                        cell_id = mapping["cell_id"]
+                    mapping = self.address_mapping[addr_id]
+                    container_number = mapping["container_number"]
+                    cluster_number = mapping["cluster_number"]
+                    pack_number = mapping["pack_number"]
                         
-                        # 找到CMD_OK之后的数据部分
-                        cmd_ok_index = line.find("CMD_OK")
-                        if cmd_ok_index == -1:
-                            print(f"Error: CMD_OK not found in sweep data: {line}")
-                            return
+                    # 找到CMD_OK之后的数据部分
+                    cmd_ok_index = line.find("CMD_OK")
+                    if cmd_ok_index == -1:
+                        print(f"Error: CMD_OK not found in sweep data: {line}")
+                        return False
                         
-                        # 获取CMD_OK之后的部分
-                        data_part = line[cmd_ok_index + len("CMD_OK"):].strip()
+                    # 获取CMD_OK之后的部分
+                    data_part = line[cmd_ok_index + len("CMD_OK"):].strip()
                         
-                        # 如果数据以逗号开头，去掉逗号
-                        if data_part.startswith(','):
-                            data_part = data_part[1:].strip()
+                    # 如果数据以逗号开头，去掉逗号
+                    if data_part.startswith(','):
+                        data_part = data_part[1:].strip()
                         
-                        # 提取数据点
-                        data_points = []
-                        sections = data_part.split(';')
+                    # 提取数据点
+                    data_points = []
+                    sections = data_part.split(';')
                         
-                        for section in sections:
-                            # 格式: R1,value,I1,value,F1,value
-                            if (section.startswith('R') and 'I' in section and 'F' in section and 
+                    for section in sections:
+                        section = section.strip()
+                        # 格式: R1,value,I1,value,F1,value
+                        if (section.startswith('R') and 'I' in section and 'F' in section and
                                 section.count(',') >= 5):
-                                try:
-                                    parts = section.split(',')
-                                    if len(parts) >= 6:
-                                        # 格式: R1,value,I1,value,F1,value
-                                        real_imp = float(parts[1])
-                                        imag_imp = float(parts[3])
-                                        frequency = float(parts[5])
-                                        data_points.append((real_imp, imag_imp, frequency))
-                                        print(f"Parsed sweep point: R={real_imp}, I={imag_imp}, F={frequency}")
-                                except (ValueError, IndexError) as e:
-                                    print(f"Error parsing sweep section: {section}, Error: {e}")
-                                    continue
+                            try:
+                                parts = [part.strip() for part in section.split(',')]
+                                if len(parts) >= 6:
+                                    # 格式: R1,value,I1,value,F1,value
+                                    real_imp = float(parts[1])
+                                    imag_imp = float(parts[3])
+                                    frequency = float(parts[5])
+                                    data_points.append((real_imp, imag_imp, frequency))
+                                    print(f"Parsed sweep point: R={real_imp}, I={imag_imp}, F={frequency}")
+                            except (ValueError, IndexError) as e:
+                                print(f"Error parsing sweep section: {section}, Error: {e}")
+                                continue
                         
-                        if data_points:
-                            self.insert_measurements(addr_id, cell_id, data_points, 
-                                                container_number, cluster_number, pack_number)
-                        else:
-                            print(f"Warning: No valid data points in sweep data: {line}")
+                    if data_points:
+                        self.insert_measurements(
+                            addr_id,
+                            cell_id,
+                            data_points,
+                            container_number,
+                            cluster_number,
+                            pack_number,
+                        )
+                        return True
+
+                    print(f"Warning: No valid data points in sweep data: {line}")
+                    return False
                             
                 except (ValueError, IndexError) as e:
                     print(f"Error parsing sweep data: {line}, Error: {e}")
+                    return False
             
             # 2. 单频数据 (GETZ命令)
             # elif ">0x" in line and "GETZ" in line and "CMD_OK" in line:
@@ -329,6 +486,9 @@ class CANReader():
                     
         except Exception as e:
             print(f"Unexpected error in parse_and_insert_data: {e}")
+            return False
+
+        return False
 
     def insert_measurements(self, addr_id: int, cell_id: int, data_points: List[tuple], 
                         container_number: int, cluster_number: int, pack_number: int):
@@ -379,5 +539,3 @@ class CANReader():
             self.cursor.close()
             self.connection.close()
             print("Database connection closed.")
-
-

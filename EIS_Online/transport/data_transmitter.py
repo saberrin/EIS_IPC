@@ -3,9 +3,9 @@
 下位机 EIS SQLite -> 网页服务器 API 上传脚本。
 
 用法示例：
-  python3 lower_machine_data_transmitter.py
-  python3 lower_machine_data_transmitter.py --server-url http://192.168.98.2:8080/api/v1/transmit-data
-  python3 lower_machine_data_transmitter.py --loop --interval-seconds 10
+  python3 -m transport.data_transmitter
+  python3 -m transport.data_transmitter --server-url http://192.168.98.2:8080/api/v1/transmit-data
+  python3 -m transport.data_transmitter --loop --interval-seconds 10
 
 注意：
 - 默认每次只上传同一个 container/cluster/pack/cell/real_time_id 的完整频率扫描。

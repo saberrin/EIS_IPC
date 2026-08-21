@@ -21,3 +21,31 @@ sudo EIS_NETWORK_INTERFACE=eth1 EIS_STATIC_CIDR=192.168.98.3/24 EIS_SERVER_IP=19
 
 总安装时跳过网络配置：
 sudo EIS_SKIP_NETWORK_SETUP=1 bash install_eis_complete.sh
+
+运行系统：
+bash EIS_Online/run_eis.sh
+
+当前运行入口为 can_tester.py。每次扫频数据成功写入 SQLite 后，系统会在独立线程中自动上传到服务器。
+上传地址、超时和重试次数在 EIS_Online/test_command.json 的 upload_config 中配置。
+
+CAN 响应重组：
+- 按板卡仲裁 ID 独立重组响应，应用层响应必须以 > 开始、以 < 结束。
+- 半包重组超时由 can_config.reassembly_timeout_seconds 配置，默认 2 秒。
+- 单条响应长度上限由 can_config.max_response_bytes 配置，默认 65536 字节。
+- 响应头板卡地址必须与 CAN 仲裁 ID 一致，否则丢弃。
+
+板卡地址映射：
+- EIS_Online/address_mapping.json 只定义板卡所属的 Container/Cluster/Pack。
+- Pack 内 Cell 编号使用板卡 GETE 响应头中的 Cell_ID，不再在 address_mapping.json 中固定。
+
+Python 工程结构：
+- EIS_Online/can_tester.py：系统运行入口与扫频任务编排。
+- EIS_Online/acquisition/：CAN 板卡通信和 EIS 数据采集。
+- EIS_Online/database/：SQLite 初始化、数据实体和数据访问。
+- EIS_Online/transport/：采集数据上传服务器。
+- EIS_Online/tools/：不参与主流程的人工维护工具。
+- tests/：自动化回归测试。
+
+手动生成待上传模拟数据：
+cd EIS_Online
+python -m tools.generate_lower_machine_container_raw_eis

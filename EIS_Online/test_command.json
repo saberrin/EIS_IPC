@@ -3,7 +3,9 @@
     "channel": "can1",
     "bitrate": 500000,
     "message_id": "0x10",
-    "timeout": 0.5
+    "timeout": 0.5,
+    "reassembly_timeout_seconds": 2.0,
+    "max_response_bytes": 65536
   },
   "test_config": {
     "test_interval_seconds": 10,
@@ -12,6 +14,12 @@
   },
   "device_config": {
     "target_address": "0x11"
+  },
+  "upload_config": {
+    "enabled": true,
+    "server_url": "http://192.168.98.2:8080/api/v1/transmit-data",
+    "max_retries": 3,
+    "timeout_seconds": 30
   },
   "logging_config": {
     "log_file": "can_test_log.txt",

@@ -20,7 +20,7 @@ fi
 
 ANACONDA_PATH="$STORAGE_MOUNT/anaconda3"
 PROJECT_DIR="$STORAGE_MOUNT/python_workspace/projects/EIS_Online"
-ENTRY_FILE="test_can_recv.py"
+ENTRY_FILE="can_tester.py"
 
 echo "存储路径: $STORAGE_MOUNT"
 echo "项目目录: $PROJECT_DIR"
