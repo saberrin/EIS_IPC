@@ -1,0 +1,51 @@
+# Offline installers and distributable packages
+Anaconda3-*-Linux-*.sh
+*.deb
+*.rpm
+*.AppImage
+*.iso
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+*.log.*
+*.pid
+
+# Generated measurements and local test output
+EIS_Online/*_data_log.csv
+EIS_Online/can_*_log.txt
+
+# Test/tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+

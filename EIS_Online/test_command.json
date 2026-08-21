@@ -1,0 +1,28 @@
+{
+  "can_config": {
+    "channel": "can1",
+    "bitrate": 500000,
+    "message_id": "0x10",
+    "timeout": 0.5
+  },
+  "test_config": {
+    "test_interval_seconds": 10,
+    "eis_sweep_interval_seconds": 10,
+    "eis_sweep_enabled": true
+  },
+  "device_config": {
+    "target_address": "0x11"
+  },
+  "logging_config": {
+    "log_file": "can_test_log.txt",
+    "error_log_file": "can_error_log.txt",
+    "data_log_file": "test_data_log.csv"
+  },
+  "eis_config": {
+    "amplitude": 0.6,
+    "bias": 200,
+    "freq_start": 100000,
+    "freq_end": 10,
+    "freq_points": 5
+  }
+}

@@ -1,0 +1,4 @@
+# EIS Online 项目依赖
+
+python-can>=4.3.0
+requests>=2.31.0
