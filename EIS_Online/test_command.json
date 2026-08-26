@@ -14,7 +14,7 @@
     "target_address": "0x11"
   },
   "upload_config": {
-    "enabled": true,
+    "enabled": false,
     "server_url": "http://192.168.98.2:8080/api/v1/transmit-data",
     "max_retries": 3,
     "timeout_seconds": 30

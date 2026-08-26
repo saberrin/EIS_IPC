@@ -31,16 +31,11 @@ class CANReader:
         address_mapping_path=None,
     ):
         super().__init__()
-        # os.system(f'sudo ip link set {channel} type can bitrate {bitrate}')
-        # os.system(f'sudo ifconfig {channel} up')
-        # self.bus = can.interface.Bus(channel=channel, bustype='socketcan', bitrate=bitrate)
+        os.system(f'sudo ip link set {channel} type can bitrate {bitrate}')
+        os.system(f'sudo ifconfig {channel} up')
 
         self.bus = None
-        
-        # 然后再执行其他初始化
-        # os.system(f'sudo ip link set {channel} type can bitrate {bitrate}')
-        # os.system(f'sudo ifconfig {channel} up')
-        
+           
         # 尝试初始化bus，如果失败则保持为None
         try:
             self.bus = can.interface.Bus(channel=channel, bustype='socketcan', bitrate=bitrate)
