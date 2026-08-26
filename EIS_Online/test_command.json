@@ -25,10 +25,10 @@
     "data_log_file": "test_data_log.csv"
   },
   "eis_config": {
-    "amplitude": 0.6,
+    "amplitude": 1,
     "bias": 200,
-    "freq_start": 100000,
-    "freq_end": 10,
+    "freq_start": 10000,
+    "freq_end": 1,
     "freq_points": 5
   }
 }

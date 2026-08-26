@@ -418,7 +418,7 @@ class CAN_Tester:
         self.configure_eis_parameters()
         
         # 启动扫频测试
-        sweep_cmd = TestCommand("GETE", 10, 0, "启动EIS扫频", 30.0)
+        sweep_cmd = TestCommand("GETE", 0, 0, "启动EIS扫频", 30.0)
         response = self.send_command(sweep_cmd)
         
         # 记录扫频开始时间
@@ -442,7 +442,7 @@ class CAN_Tester:
     
     def monitor_eis_progress(self, start_time):
         """后台监控EIS扫频进度"""
-        max_duration = 1000  # 最大预计持续时间（秒）
+        max_duration = 10000  # 最大预计持续时间（秒）
         check_interval = 10  # 检查间隔（秒）
         
         self.log_info(f"开始监控EIS扫频进度，预计最大时长: {max_duration}秒")
@@ -484,14 +484,15 @@ class CAN_Tester:
         last_eis_time = 0
         
         self.log_info(f"周期性测试启动，间隔: {interval}秒")
+
         
         while self.running:
             try:
                 current_time = time.time()
                 
                 # 执行基本测试
-                self.log_info("=" * 50)
-                self.log_info(f"执行周期性测试 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                # self.log_info("=" * 50)
+                # self.log_info(f"执行周期性测试 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 # self.run_basic_test()
                 
                 # 检查是否执行EIS扫频测试
