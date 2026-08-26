@@ -58,7 +58,7 @@ class CANReader:
 
         # 回调函数 - EIS扫频完成回调
         self.on_eis_complete = on_eis_complete
-
+        self.EIS_LAST_CELL_ID = 52
         self.real_time_id = None
         
         # 从配置文件加载地址映射
@@ -390,7 +390,7 @@ class CANReader:
                 print(f"Data inserted successfully. Batch ID: {real_time_id}")
 
                 # 触发扫频完成回调
-                if self.on_eis_complete:
+                if cell_id == self.EIS_LAST_CELL_ID and self.on_eis_complete:
                     self.on_eis_complete()
                 
         except Exception as e:
