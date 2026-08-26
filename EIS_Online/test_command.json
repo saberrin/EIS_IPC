@@ -3,9 +3,7 @@
     "channel": "can1",
     "bitrate": 500000,
     "message_id": "0x10",
-    "timeout": 0.5,
-    "reassembly_timeout_seconds": 2.0,
-    "max_response_bytes": 65536
+    "timeout": 0.5
   },
   "test_config": {
     "test_interval_seconds": 10,

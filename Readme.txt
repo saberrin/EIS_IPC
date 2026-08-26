@@ -28,11 +28,9 @@ bash EIS_Online/run_eis.sh
 当前运行入口为 can_tester.py。每次扫频数据成功写入 SQLite 后，系统会在独立线程中自动上传到服务器。
 上传地址、超时和重试次数在 EIS_Online/test_command.json 的 upload_config 中配置。
 
-CAN 响应重组：
-- 按板卡仲裁 ID 独立重组响应，应用层响应必须以 > 开始、以 < 结束。
-- 半包重组超时由 can_config.reassembly_timeout_seconds 配置，默认 2 秒。
-- 单条响应长度上限由 can_config.max_response_bytes 配置，默认 65536 字节。
-- 响应头板卡地址必须与 CAN 仲裁 ID 一致，否则丢弃。
+CAN 响应接收：
+- 按旧版逻辑连续拼接接收帧，遇到 < 后返回当前响应。
+- 不使用按仲裁 ID 分组、半包超时丢弃或响应头强校验。
 
 板卡地址映射：
 - EIS_Online/address_mapping.json 只定义板卡所属的 Container/Cluster/Pack。

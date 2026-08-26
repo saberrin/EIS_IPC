@@ -21,7 +21,7 @@ sys.modules.setdefault(
 )
 
 from can_tester import CAN_Tester
-from acquisition.can_reader import CANReader, CANStreamReassembler
+from acquisition.can_reader import CANReader
 from transport import data_transmitter as transmitter_module
 
 
@@ -87,56 +87,28 @@ class BoardMappingTests(unittest.TestCase):
         self.assertEqual(captured["data_points"], [(0.1, -0.2, 1000.0), (0.3, -0.4, 10.0)])
 
 
-class CANReassemblyTests(unittest.TestCase):
-    def test_interleaved_board_frames_are_isolated(self):
-        reassembler = CANStreamReassembler(timeout_seconds=2)
+class LegacyCANReceiveTests(unittest.TestCase):
+    def test_frames_are_appended_until_terminator(self):
+        class FakeBus:
+            def __init__(self):
+                self.frames = iter(
+                    [
+                        SimpleNamespace(data=b">0x11,GE"),
+                        SimpleNamespace(data=b"TE,37,C"),
+                        SimpleNamespace(data=b"MD_OK<"),
+                    ]
+                )
 
-        self.assertEqual(reassembler.feed(0x11, b">0x11,GET", now=0), [])
-        board_12 = reassembler.feed(0x12, b">0x12,STAT,CMD_OK<", now=0.1)
-        board_11 = reassembler.feed(0x11, b"E,1,0,CMD_OK<", now=0.2)
+            def recv(self, timeout):
+                return next(self.frames)
 
-        self.assertEqual(board_12, [b">0x12,STAT,CMD_OK<"])
-        self.assertEqual(board_11, [b">0x11,GETE,1,0,CMD_OK<"])
+        reader = CANReader.__new__(CANReader)
+        reader.bus = FakeBus()
+        reader.running = True
+        reader.timeout_duration = 0.1
+        reader.line_ending = b"<"
 
-    def test_stale_partial_response_is_not_joined_to_later_data(self):
-        reassembler = CANStreamReassembler(timeout_seconds=1)
-        reassembler.feed(0x11, b">0x11,GETE,old", now=0)
-
-        self.assertEqual(reassembler.feed(0x11, b",tail<", now=1.1), [])
-        self.assertEqual(reassembler.dropped_timeouts, 1)
-
-    def test_new_start_resynchronizes_incomplete_response(self):
-        reassembler = CANStreamReassembler(timeout_seconds=2)
-        reassembler.feed(0x11, b">0x11,broken", now=0)
-
-        completed = reassembler.feed(0x11, b">0x11,STAT,CMD_OK<", now=0.1)
-
-        self.assertEqual(completed, [b">0x11,STAT,CMD_OK<"])
-        self.assertEqual(reassembler.dropped_resync, 1)
-
-    def test_multiple_messages_in_one_frame_are_preserved(self):
-        reassembler = CANStreamReassembler(timeout_seconds=2)
-
-        completed = reassembler.feed(
-            0x11,
-            b"noise>0x11,STAT,CMD_OK<\n>0x11,GETT,CMD_OK<",
-            now=0,
-        )
-
-        self.assertEqual(
-            completed,
-            [b">0x11,STAT,CMD_OK<", b">0x11,GETT,CMD_OK<"],
-        )
-
-    def test_oversize_partial_response_is_discarded(self):
-        reassembler = CANStreamReassembler(timeout_seconds=2, max_message_bytes=16)
-
-        self.assertEqual(reassembler.feed(0x11, b">" + b"x" * 16, now=0), [])
-        self.assertEqual(reassembler.dropped_oversize, 1)
-
-    def test_response_header_must_match_arbitration_id(self):
-        self.assertTrue(CANReader._response_matches_source(b">0x11,GETE,CMD_OK<", 0x11))
-        self.assertFalse(CANReader._response_matches_source(b">0x12,GETE,CMD_OK<", 0x11))
+        self.assertEqual(reader.read_until_end(), b">0x11,GETE,37,CMD_OK<")
 
 
 class AutomaticUploadTests(unittest.TestCase):

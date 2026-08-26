@@ -231,8 +231,6 @@ class CAN_Tester:
         channel = can_config.get("channel", "can1")
         bitrate = can_config.get("bitrate", 500000)
         timeout = can_config.get("timeout", 0.1)
-        reassembly_timeout = can_config.get("reassembly_timeout_seconds", 2.0)
-        max_response_bytes = can_config.get("max_response_bytes", 65536)
         
         # 解析十六进制的message_id
         message_id_str = can_config.get("message_id", "0x10")
@@ -249,8 +247,6 @@ class CAN_Tester:
                 timeout_duration=timeout,
                 message_id=message_id,  # 传入整数类型
                 on_eis_complete=self._on_eis_sweep_complete,  # 设置回调
-                reassembly_timeout_seconds=float(reassembly_timeout),
-                max_response_bytes=int(max_response_bytes),
             )
             
             self.can_reader.start_reading()

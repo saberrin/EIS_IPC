@@ -14,89 +14,10 @@ from database.entity import EisMeasurement
 import json
 import can
 import os
-from collections import deque
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
-
-class CANStreamReassembler:
-    """按 CAN 仲裁 ID 重组以 ``>`` 开始、以 ``<`` 结束的响应。"""
-
-    def __init__(self, timeout_seconds=2.0, max_message_bytes=65536):
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
-        if max_message_bytes <= 0:
-            raise ValueError("max_message_bytes must be positive")
-
-        self.timeout_seconds = float(timeout_seconds)
-        self.max_message_bytes = int(max_message_bytes)
-        self._buffers = {}
-        self._updated_at = {}
-        self.dropped_timeouts = 0
-        self.dropped_oversize = 0
-        self.dropped_resync = 0
-
-    def expire(self, now=None):
-        """丢弃长时间没有后续帧的半包，并返回对应的仲裁 ID。"""
-        now = time.monotonic() if now is None else float(now)
-        expired = [
-            source_id
-            for source_id, updated_at in self._updated_at.items()
-            if now - updated_at >= self.timeout_seconds
-        ]
-        for source_id in expired:
-            self._buffers.pop(source_id, None)
-            self._updated_at.pop(source_id, None)
-        self.dropped_timeouts += len(expired)
-        return expired
-
-    def feed(self, source_id, payload, now=None):
-        """加入一个 CAN 数据帧，返回本帧完成的零条或多条协议消息。"""
-        now = time.monotonic() if now is None else float(now)
-        self.expire(now)
-        payload = bytes(payload)
-        if not payload:
-            return []
-
-        source_id = int(source_id)
-        buffer = self._buffers.setdefault(source_id, bytearray())
-        buffer.extend(payload)
-        completed = []
-
-        while buffer:
-            start_index = buffer.find(b">")
-            if start_index < 0:
-                # 起始符之前的数据不属于应用层响应。
-                buffer.clear()
-                break
-            if start_index:
-                del buffer[:start_index]
-
-            end_index = buffer.find(b"<", 1)
-            next_start_index = buffer.find(b">", 1)
-            if next_start_index >= 0 and (end_index < 0 or next_start_index < end_index):
-                # 上一条消息没有结束，新响应已经开始；从新响应重新同步。
-                del buffer[:next_start_index]
-                self.dropped_resync += 1
-                continue
-
-            if end_index >= 0:
-                completed.append(bytes(buffer[: end_index + 1]))
-                del buffer[: end_index + 1]
-                continue
-
-            if len(buffer) > self.max_message_bytes:
-                buffer.clear()
-                self.dropped_oversize += 1
-            break
-
-        if buffer:
-            self._updated_at[source_id] = now
-        else:
-            self._buffers.pop(source_id, None)
-            self._updated_at.pop(source_id, None)
-        return completed
 
 class CANReader:
     
@@ -108,8 +29,6 @@ class CANReader:
         message_id=0x10,
         on_eis_complete=None,
         address_mapping_path=None,
-        reassembly_timeout_seconds=2.0,
-        max_response_bytes=65536,
     ):
         super().__init__()
         # os.system(f'sudo ip link set {channel} type can bitrate {bitrate}')
@@ -150,12 +69,6 @@ class CANReader:
         # 从配置文件加载地址映射
         self.address_mapping_path = Path(address_mapping_path) if address_mapping_path else PROJECT_DIR / "address_mapping.json"
         self.address_mapping = self.load_address_mapping()
-        self.reassembler = CANStreamReassembler(
-            timeout_seconds=reassembly_timeout_seconds,
-            max_message_bytes=max_response_bytes,
-        )
-        self._completed_messages = deque()
-        self._configure_receive_filters()
         
         # 不再需要用户输入，从配置文件中获取
         self.container_number = None
@@ -241,21 +154,6 @@ class CANReader:
             print(f"Error loading address mapping: {e}")
             return {}
 
-    def _configure_receive_filters(self):
-        """尽量在 SocketCAN 层只接收已配置板卡的标准数据帧。"""
-        if not self.bus or not self.address_mapping:
-            return
-        filters = [
-            {"can_id": addr_id, "can_mask": 0x7FF, "extended": False}
-            for addr_id in sorted(self.address_mapping)
-        ]
-        try:
-            self.bus.set_filters(filters)
-        except Exception as error:
-            # 部分虚拟 CAN 后端不支持过滤，仍由下面的软件过滤兜底。
-            print(f"Warning: failed to configure CAN receive filters: {error}")
-
-
     def start_reading(self):
         print("Starting CAN reading...")
         thread = threading.Thread(target=self.read_data, daemon=True)
@@ -278,9 +176,6 @@ class CANReader:
                 self.parse_and_insert_data(line_decoded)
 
     def read_until_end(self):
-        if self._completed_messages:
-            return self._completed_messages.popleft()
-
         bus = self.bus
         if bus is None:
             time.sleep(self.timeout_duration)
@@ -288,35 +183,16 @@ class CANReader:
 
         try:
             while self.running:
-                msg = bus.recv(timeout=self.timeout_duration)
-                if msg is None:
-                    expired = self.reassembler.expire()
-                    for source_id in expired:
-                        print(f"Warning: discarded stale CAN partial response from 0x{source_id:X}")
-                    continue
+                received_data = b""
+                while self.running:
+                    msg = bus.recv(timeout=self.timeout_duration)
+                    if msg is None:
+                        break
 
-                if (
-                    getattr(msg, "is_error_frame", False)
-                    or getattr(msg, "is_remote_frame", False)
-                    or getattr(msg, "is_extended_id", False)
-                ):
-                    continue
-
-                source_id = int(msg.arbitration_id)
-                if self.address_mapping and source_id not in self.address_mapping:
-                    continue
-
-                for response in self.reassembler.feed(source_id, msg.data):
-                    if self._response_matches_source(response, source_id):
-                        self._completed_messages.append(response)
-                    else:
-                        print(
-                            "Warning: discarded CAN response whose header address "
-                            f"does not match arbitration ID 0x{source_id:X}"
-                        )
-
-                if self._completed_messages:
-                    return self._completed_messages.popleft()
+                    received_data += bytes(msg.data)
+                    if self.line_ending in received_data:
+                        line_end_index = received_data.index(self.line_ending) + len(self.line_ending)
+                        return received_data[:line_end_index]
         except (IOError, OSError) as e:
             print(f"Error in read_until_end: {e}")
             time.sleep(0.01)
@@ -324,12 +200,6 @@ class CANReader:
             print(f"Unexpected CAN receive error: {e}")
             time.sleep(0.05)
         return None
-
-    @staticmethod
-    def _response_matches_source(response, source_id):
-        """响应头中的板卡地址必须与 CAN 仲裁 ID 一致。"""
-        match = re.match(rb"^>0x([0-9A-Fa-f]+)\s*,", response)
-        return bool(match and int(match.group(1), 16) == int(source_id))
 
     def write_data(self, data_to_send):
         if isinstance(data_to_send, str):
