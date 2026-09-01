@@ -4,6 +4,7 @@ from datetime import datetime
 import time
 import threading
 import re
+import math
 from pathlib import Path
 
 from typing import List
@@ -50,6 +51,10 @@ class CANReader:
         self.chunk_size = 1
         self.line_ending = b'<'
         self.timeout_duration = timeout_duration
+        self.receive_buffers = {}
+        self.receive_buffer_updated_at = {}
+        self.max_receive_buffer_size = 64 * 1024
+        self.receive_buffer_stale_seconds = max(5.0, float(timeout_duration) * 5.0)
         self.running = True
         self.data = []
         self.temperature = None
@@ -178,16 +183,33 @@ class CANReader:
 
         try:
             while self.running:
-                received_data = b""
-                while self.running:
-                    msg = bus.recv(timeout=self.timeout_duration)
-                    if msg is None:
-                        break
+                msg = bus.recv(timeout=self.timeout_duration)
+                if msg is None:
+                    return None
 
-                    received_data += bytes(msg.data)
-                    if self.line_ending in received_data:
-                        line_end_index = received_data.index(self.line_ending) + len(self.line_ending)
-                        return received_data[:line_end_index]
+                arbitration_id = int(msg.arbitration_id)
+                now = time.monotonic()
+                last_update = self.receive_buffer_updated_at.get(arbitration_id)
+                if last_update is not None and now - last_update > self.receive_buffer_stale_seconds:
+                    self.receive_buffers.pop(arbitration_id, None)
+
+                receive_buffer = self.receive_buffers.setdefault(arbitration_id, bytearray())
+                receive_buffer.extend(bytes(msg.data))
+                self.receive_buffer_updated_at[arbitration_id] = now
+
+                if len(receive_buffer) > self.max_receive_buffer_size:
+                    print(f"Warning: discard oversized CAN record from 0x{arbitration_id:X}")
+                    receive_buffer.clear()
+                    continue
+
+                line_end_index = receive_buffer.find(self.line_ending)
+                if line_end_index >= 0:
+                    line_end_index += len(self.line_ending)
+                    complete_line = bytes(receive_buffer[:line_end_index])
+                    del receive_buffer[:line_end_index]
+                    while receive_buffer and receive_buffer[0] in b"\r\n\x00":
+                        del receive_buffer[0]
+                    return complete_line
         except (IOError, OSError) as e:
             print(f"Error in read_until_end: {e}")
             time.sleep(0.01)
@@ -260,14 +282,26 @@ class CANReader:
                     if data_part.startswith(','):
                         data_part = data_part[1:].strip()
                         
-                    # 提取数据点
+                    # 提取一次扫频共用的状态快照和阻抗数据点。
+                    telemetry = {
+                        "voltage": None,
+                        "pack_current": None,
+                        "temperature": None,
+                        "valid_flags": 0,
+                    }
                     data_points = []
                     sections = data_part.split(';')
                         
                     for section in sections:
                         section = section.strip()
+                        if section.startswith('V,'):
+                            parsed_telemetry = self.parse_telemetry_section(section)
+                            if parsed_telemetry is None:
+                                print(f"Warning: invalid EIS telemetry section: {section}")
+                            else:
+                                telemetry = parsed_telemetry
                         # 格式: R1,value,I1,value,F1,value
-                        if (section.startswith('R') and 'I' in section and 'F' in section and
+                        elif (section.startswith('R') and 'I' in section and 'F' in section and
                                 section.count(',') >= 5):
                             try:
                                 parts = [part.strip() for part in section.split(',')]
@@ -290,6 +324,7 @@ class CANReader:
                             container_number,
                             cluster_number,
                             pack_number,
+                            telemetry,
                         )
                         return True
 
@@ -355,13 +390,39 @@ class CANReader:
 
         return False
 
+    @staticmethod
+    def parse_telemetry_section(section: str):
+        """解析 V,<V>,CUR,<A>,T,<degC>,VALID,<mask> 状态段。"""
+        try:
+            tokens = [token.strip() for token in section.split(',')]
+            if len(tokens) != 8 or tokens[0] != 'V' or tokens[2] != 'CUR' or tokens[4] != 'T' or tokens[6] != 'VALID':
+                return None
+
+            voltage = float(tokens[1])
+            pack_current = float(tokens[3])
+            temperature = float(tokens[5])
+            valid_flags = int(tokens[7], 0)
+            if valid_flags < 0 or valid_flags > 7:
+                return None
+
+            return {
+                "voltage": voltage if valid_flags & 0x01 and math.isfinite(voltage) else None,
+                "pack_current": pack_current if valid_flags & 0x02 and math.isfinite(pack_current) else None,
+                "temperature": temperature if valid_flags & 0x04 and math.isfinite(temperature) else None,
+                "valid_flags": valid_flags,
+            }
+        except (TypeError, ValueError):
+            return None
+
     def insert_measurements(self, addr_id: int, cell_id: int, data_points: List[tuple], 
-                        container_number: int, cluster_number: int, pack_number: int):
+                        container_number: int, cluster_number: int, pack_number: int,
+                        telemetry=None):
         """
         Insert measurements into database.
         """
         real_time_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         measurements = []
+        telemetry = telemetry or {}
         
         # Create EisMeasurement objects
         for dp in data_points:
@@ -373,11 +434,12 @@ class CANReader:
                 frequency=frequency,
                 real_impedance=real_impedance,
                 imag_impedance=imag_impedance,
-                voltage=0.0,  # 默认值
-                temperature=0.0,  # 默认值
+                voltage=telemetry.get("voltage"),
+                temperature=telemetry.get("temperature"),
                 container_number=container_number,
                 cluster_number=cluster_number,
-                pack_number=pack_number
+                pack_number=pack_number,
+                pack_current=telemetry.get("pack_current"),
             )
             measurements.append(measurement)
         

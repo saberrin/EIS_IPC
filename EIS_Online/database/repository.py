@@ -18,6 +18,7 @@ class Repository:
         """
         Insert multiple measurements into the database.
         """
+        connection = None
         try:
             # Confirm that the table exists
             connection = sqlite3.connect(DB_PATH)
@@ -29,18 +30,23 @@ class Repository:
         
             cursor.executemany("""
             INSERT INTO eis_measurement (cell_id, real_time_id, frequency, real_impedance, imag_impedance, voltage, temperature,
-                                         container_number, cluster_number, pack_number)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         pack_current, container_number, cluster_number, pack_number)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [
             (m.cell_id, m.real_time_id, m.frequency, m.real_impedance, m.imag_impedance, m.voltage,m.temperature,
-             m.container_number, m.cluster_number, m.pack_number)
+             m.pack_current, m.container_number, m.cluster_number, m.pack_number)
             for m in measurements
         ])
             connection.commit()
             print("Measurements inserted successfully.")
         except Exception as e:
             print(f"Error inserting measurements: {e}")
-            connection.rollback()
+            if connection:
+                connection.rollback()
+            raise
+        finally:
+            if connection:
+                connection.close()
 
 
     def insert_generated_info(self, generated_info_list: List[Dict]):
@@ -174,7 +180,10 @@ class Repository:
             # cursor.execute("SELECT * FROM eis_measurement WHERE cell_id = ? ORDER BY creation_time DESC LIMIT ?;", (cell_id, limit))
             # cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT * FROM eis_measurement 
+                SELECT cell_id, real_time_id, frequency, real_impedance, imag_impedance,
+                       voltage, temperature, pack_current,
+                       container_number, cluster_number, pack_number
+                FROM eis_measurement
                 WHERE cell_id = ? 
                 ORDER BY real_time_id DESC 
                 LIMIT ?;
@@ -182,13 +191,14 @@ class Repository:
             rows = cursor.fetchall()
             return [
                 EisMeasurement(
-                    cell_id=row[1], 
-                    real_time_id=row[2], 
-                    frequency=row[3], 
-                    real_impedance=row[4], 
-                    imag_impedance=row[5], 
-                    voltage=row[6],
-                    temperature = row[7],
+                    cell_id=row[0],
+                    real_time_id=row[1],
+                    frequency=row[2],
+                    real_impedance=row[3],
+                    imag_impedance=row[4],
+                    voltage=row[5],
+                    temperature=row[6],
+                    pack_current=row[7],
                     container_number=row[8],
                     cluster_number=row[9],
                     pack_number=row[10]
@@ -212,7 +222,9 @@ class Repository:
                 cursor = connection.cursor()
                 # Fetch data grouped by real_time_id, limited to the most recent 'index' real_time_ids
                 cursor.execute("""
-                    SELECT * 
+                    SELECT cell_id, real_time_id, frequency, real_impedance, imag_impedance,
+                           voltage, temperature, pack_current,
+                           container_number, cluster_number, pack_number
                     FROM eis_measurement 
                     WHERE cell_id = ? 
                     ORDER BY real_time_id DESC, frequency ASC;
@@ -223,18 +235,19 @@ class Repository:
                 grouped_data = defaultdict(list)
                 for row in rows:
                     measurement = EisMeasurement(
-                        cell_id=row[1],
-                        real_time_id=row[2],
-                        frequency=row[3],
-                        real_impedance=row[4],
-                        imag_impedance=row[5],
-                        voltage=row[6],
-                        temperature=row[7],
+                        cell_id=row[0],
+                        real_time_id=row[1],
+                        frequency=row[2],
+                        real_impedance=row[3],
+                        imag_impedance=row[4],
+                        voltage=row[5],
+                        temperature=row[6],
+                        pack_current=row[7],
                         container_number=row[8],
                         cluster_number=row[9],
                         pack_number=row[10]
                     )
-                    grouped_data[row[2]].append(measurement)
+                    grouped_data[row[1]].append(measurement)
 
                 # Limit to the most recent 'index' real_time_id groups
                 sorted_keys = sorted(grouped_data.keys(), reverse=True)[:index]

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional
 
 @dataclass
 class EisMeasurement:
@@ -13,3 +14,4 @@ class EisMeasurement:
     container_number: int
     cluster_number: int
     pack_number: int
+    pack_current: Optional[float] = None

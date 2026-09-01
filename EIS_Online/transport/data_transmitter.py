@@ -78,6 +78,8 @@ class DataTransmitter:
                    real_impedance,
                    imag_impedance,
                    voltage,
+                   temperature,
+                   pack_current,
                    container_number,
                    cluster_number,
                    pack_number
@@ -170,6 +172,8 @@ class DataTransmitter:
                 real_impedance,
                 imag_impedance,
                 voltage,
+                temperature,
+                pack_current,
                 container_number,
                 cluster_number,
                 pack_number,
@@ -179,16 +183,15 @@ class DataTransmitter:
                 print(f"Skip invalid point measurement_id={measurement_id}: missing frequency/impedance.")
                 continue
 
-            safe_voltage = voltage if voltage is not None and voltage > 0 else 0.01
-
             measurements.append(
                 {
                     "containerId": str(container_number),
                     "clusterId": str(cluster_number),
                     "packId": str(pack_number),
                     "cellId": str(cell_id),
-                    "temperature": 25.0,
-                    "voltage": float(safe_voltage),
+                    "temperature": float(temperature) if temperature is not None else None,
+                    "voltage": float(voltage) if voltage is not None else None,
+                    "packCurrent": float(pack_current) if pack_current is not None else None,
                     "frequency": float(frequency),
                     "realImpedance": float(real_impedance),
                     "imaginaryImpedance": float(imag_impedance),

@@ -60,6 +60,7 @@ def init_database():
             "imag_impedance" REAL,
             "voltage" REAL,
             "temperature" REAL,
+            "pack_current" REAL,
             "container_number" INTEGER,
             "cluster_id" INTEGER,        -- 添加 cluster_id
             "cluster_number" INTEGER,    -- 添加 cluster_number
@@ -68,6 +69,13 @@ def init_database():
             CONSTRAINT "fk_eis_cluster" FOREIGN KEY ("cluster_number") REFERENCES "battery_cluster" ("cluster_number") ON DELETE SET NULL ON UPDATE CASCADE
         );
         """)
+
+        # CREATE TABLE IF NOT EXISTS does not add columns to an existing database.
+        # Keep deployed IPC databases and their unsent EIS scans intact.
+        cursor.execute("PRAGMA table_info(eis_measurement);")
+        eis_columns = {row[1] for row in cursor.fetchall()}
+        if "pack_current" not in eis_columns:
+            cursor.execute("ALTER TABLE eis_measurement ADD COLUMN pack_current REAL;")
 
         # Create the generated_info table with measurement_id as foreign key
         cursor.execute("""
@@ -106,6 +114,8 @@ def init_database():
         print(f"Database error: {e}")
         return None, None
     finally:
+        if 'cursor' in locals() and cursor:
+            cursor.close()
         if 'connection' in locals() and connection:
             connection.close()
 

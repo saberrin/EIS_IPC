@@ -110,6 +110,7 @@ def ensure_schema(connection):
             imag_impedance REAL,
             voltage REAL,
             temperature REAL,
+            pack_current REAL,
             container_number INTEGER,
             cluster_id INTEGER,
             cluster_number INTEGER,
@@ -122,6 +123,9 @@ def ensure_schema(connection):
         )
         """
     )
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(eis_measurement)")}
+    if "pack_current" not in columns:
+        cursor.execute("ALTER TABLE eis_measurement ADD COLUMN pack_current REAL")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_pack_cluster_number ON battery_pack(cluster_number)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_eis_cluster_number ON eis_measurement(cluster_number)")
 
@@ -261,6 +265,7 @@ def insert_measurements(
             real_time_id = f"{measured_at}|C{container_number}|P{pack_number}|CELL{cell_id:03d}"
             voltage = 3.62 + rng.uniform(-0.035, 0.035)
             temperature = 25.0 + rng.uniform(-1.5, 1.5)
+            pack_current = rng.uniform(-2.0, 2.0)
             for frequency in frequencies:
                 real_impedance, imag_impedance = impedance_point(
                     container_number,
@@ -279,13 +284,14 @@ def insert_measurements(
                         imag_impedance,
                         voltage,
                         temperature,
+                        pack_current,
                         container_number,
                         cluster_id,
                         cluster_number,
                         pack_number,
                         sent_time
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     (
                         cell_id,
@@ -295,6 +301,7 @@ def insert_measurements(
                         imag_impedance,
                         voltage,
                         temperature,
+                        pack_current,
                         container_number,
                         cluster_id,
                         cluster_number,
